@@ -1,0 +1,341 @@
+#!/usr/bin/env python
+# encoding: utf-8
+
+'''
+1.analyze json file to get the concentration of pollution
+2.get information from json file
+3.get land boundary information form json file
+4.create vector point file based on point coordinates
+5.interpolation 
+6.mask analysis
+7.create png file based on tif 
+
+create time：2020-11-5
+creator：刘静 Jing Liu
+email: liu_xxxi@163.com
+
+'''
+import sys
+import os
+import time
+import warnings
+import json
+import pandas as pd
+import numpy as np
+import gdal,ogr,osr
+import matplotlib as mpl
+from matplotlib import pyplot as plt
+from matplotlib import cm
+from matplotlib import ticker
+
+#range_shape生成
+def create_range(points,out_shp):
+    # 创建矢量文件
+    sr = osr.SpatialReference()
+    sr.ImportFromEPSG(4326)
+    driver: ogr.Driver = ogr.GetDriverByName('ESRI Shapefile')
+    shp_ds = driver.CreateDataSource(out_shp)
+    shp_layer = shp_ds.CreateLayer('range', sr, geom_type=ogr.wkbPolygon)
+
+    #  由线构建多边形
+    ring = ogr.Geometry(ogr.wkbLinearRing)  # 构建几何类型:线
+    for i in range(len(points)):
+        lat = points['lat'][i]
+        lon = points['lon'][i]
+        ring.AddPoint(lon,lat)
+    yard = ogr.Geometry(ogr.wkbPolygon)  # 构建几何类型:多边形面
+    yard.AddGeometry(ring)
+    yard.CloseRings()
+
+    point_feature = ogr.Feature(shp_layer.GetLayerDefn())
+    point_feature.SetGeometry(yard)
+    shp_layer.CreateFeature(point_feature)
+    point_feature = None
+    shp_layer = None
+    shp_ds = None
+
+#点矢量创建数字格式的字段
+def create_real_field(field_name, layer):
+    field_geo = ogr.FieldDefn(field_name, ogr.OFTReal)
+    field_geo.SetWidth(50)
+    field_geo.SetPrecision(3)
+    layer.CreateField(field_geo)  # 创建字段
+
+#点矢量创建字符串格式的字段
+def create_txt_field(field_name, layer):
+    field_geo = ogr.FieldDefn(field_name, ogr.OFTString)
+    field_geo.SetWidth(50)  # 设置长度
+    layer.CreateField(field_geo)  # 创建字段
+
+#根据站点坐标值生成点文件
+def write_point(sub_data, point_file):
+    """
+    站点数据写成shapefile文件
+    """
+    # gdal.SetConfigOption("GDAL_FILENAME_IS_UTF8","NO") #支持中文路径
+
+    fields = sub_data.columns
+
+    #gdal.SetConfigOption("SHAPE_ENCODING", "GBK")  # 属性字段支持中文
+    strDriverName = "ESRI Shapefile"
+    oDriver = ogr.GetDriverByName(strDriverName)
+    if oDriver == None:
+        print("{driver} 驱动不可用！".format(driver=strDriverName))
+        os._exit(0)
+
+    # 创建矢量数据源
+    data_source = oDriver.CreateDataSource(point_file)
+
+    # 指定坐标系
+    srs = osr.SpatialReference()
+    srs.ImportFromEPSG(4326)
+
+    # 创建图层
+    out_layer = data_source.CreateLayer("station_shape", srs, ogr.wkbPoint)
+
+    # 设置经纬度
+    create_real_field("Lat", out_layer)
+    create_real_field("Lon", out_layer)
+    #设置污染物浓度字段
+    create_real_field(fields[2], out_layer)
+
+    for index, row in sub_data.iterrows():
+        infeature = ogr.Feature(out_layer.GetLayerDefn())
+        infeature.SetField("Lat", row["y"])
+        infeature.SetField("Lon", row["x"])
+        infeature.SetField(fields[2], row[fields[2]])
+
+        wkt = "POINT(%f %f)" % (float(row['x']), float(row['y']))
+
+        point = ogr.CreateGeometryFromWkt(wkt)
+        infeature.SetGeometry(point)
+        out_layer.CreateFeature(infeature)
+
+    infeature = None
+    out_layer = None
+    data_source = None
+
+#根据点矢量进行重采样
+def idw(output_file,point_station_file,ref_shp,field):
+    """
+    idw空间插值
+    :param output_file:插值结果
+    :param point_station_file: 矢量站点数据
+    :return:
+    """
+
+    vector_ds = ogr.Open(ref_shp)
+    vector_layer = vector_ds.GetLayer()
+    x_min, x_max, y_min, y_max = vector_layer.GetExtent()
+    outputBounds=[x_min,y_max,x_max,y_min]
+
+    #根据四至和分辨率获取行列数
+    cols = int((x_max-x_min)/0.00001)
+    rows = int((y_max-y_min)/0.00001)
+
+    # 重采样代码调用
+    opts = gdal.GridOptions(
+        algorithm="invdist:power =3.6:smoothing =0.0:radius1=0.0:radius2=0.0:angle=0.0:max_points=12:min_points=0:nodata=0.0",
+        #algorithm="invdistnn:power=2.0:smothing=0.0:radius=1.0:max_points=12:min_points=0:nodata=0.0",
+        width=cols,
+        height=rows,
+        outputBounds=outputBounds,
+        format="GTiff", outputType=gdal.GDT_Float32, zfield=field)
+    idw_out = gdal.Grid(destName=output_file, srcDS=point_station_file, options=opts)
+    idw_out = None
+    vector_ds = None
+
+#重采样后根据shp文件进行掩膜裁剪，返回掩膜后数值
+def mask_tif(mask,input_tif,shp_range):
+    result = gdal.Warp(mask, input_tif,cutlineDSName=shp_range)
+    result.FlushCache()
+    tif_file = gdal.Open(mask)
+    data = tif_file.GetRasterBand(1).ReadAsArray()
+    del result
+    return data
+    tif_file = None
+
+#背景值变为透明
+def transparent_back(pngimg, img):
+    pngimg = pngimg.convert('RGBA')
+    L, H = pngimg.size
+    for h in range(H):
+        for l in range(L):
+            dot = (l, h)
+            # 背景值
+            bgdata = img.getpixel(dot)
+            color_1 = pngimg.getpixel(dot)
+            if bgdata == 0:
+                color_1 = color_1[:-1] + (0,)
+                pngimg.putpixel(dot, color_1)
+    return pngimg
+    del pngimg
+
+#掩膜后tif文件进行png转换
+def create_png(data,pngname,threshold,trans):
+    fig = plt.figure(1 , figsize=(5,4))
+    axs0 = plt.subplot(111)
+    # 根据值区间定义颜色条,一共分为九类，并且需要提供阈值
+    # 0-1之间为白色，做为背景色，即只有0值为白色
+    colors = ['#FFFFFF',\
+              "#96F3FF"  ,"#83E8FF"  ,"#1AD4FF","#00C3FF" ,\
+              "#00E6AF", "#00E650", "#00E619", "#1EE600",\
+              "#DCFA00", "#FFF400", "#FFEF00", "#FFE600",\
+              "#FFBC00", "#FFB200","#FFAA00", "#FE9100",\
+              "#FE7300", "#FA0000", "#F90000", "#F80103"]
+
+    #colors = ['#FFFFFF', '#90EE90', '#7CFC00', '#ADFF2F', '#9ACD32', '#FFFF99', '#FFCC00', '#FF9900', '#FF5500','#FF0000']
+    # 边界值,包下不包上,并且设置阈值,根据阈值划分边界
+    list_bounds = np.linspace(0.0001,float(threshold),22)
+    list_bounds = np.insert(list_bounds, 0, 0)
+    bounds = np.append(list_bounds, float(threshold)*1.2)
+    cmap = mpl.colors.ListedColormap(colors)
+    norm = mpl.colors.BoundaryNorm(bounds, cmap.N)
+    im = axs0.imshow(data, interpolation='bicubic', cmap=cmap, norm=norm,origin='upper')
+    plt.axis('off')
+    # 解决中文显示问题
+    plt.rcParams['font.sans-serif'] = ['SimHei']
+    plt.rcParams['axes.unicode_minus'] = False
+    name = os.path.basename(pngname)
+    name = name.split('_')[0]
+    axs0.set_title(name+'_'+trans, y=1.05, fontdict={'fontsize': 7, 'fontweight': 'medium'})
+
+    #添加颜色条
+    sm = cm.ScalarMappable(cmap=cmap, norm=norm)  # norm设置最大最小值
+    sm.set_array(bounds)
+    cb = plt.colorbar(sm,pad=0.05,shrink=0.8)
+
+    cb.outline.set_linewidth(0.05)
+    tick_locator = ticker.MaxNLocator(nbins=5)
+    cb.locator = tick_locator
+    #cb.set_ticks('off')
+
+    #设置刻度线数值
+    cb.set_ticks([np.min(bounds), np.min(bounds)+np.max(bounds)/4-np.max(bounds)/4/3,\
+        np.min(bounds)+np.max(bounds)/4*2-np.max(bounds)/4/3, \
+        np.min(bounds)+np.max(bounds)/4*3-np.max(bounds)/4/3, np.max(bounds)],)
+    cb.ax.tick_params(width=0,length=0.5)
+    cb.update_ticks()
+    cb.ax.tick_params(labelsize=4)
+
+    # 去除图像周围的白边
+    fig.set_size_inches(3,1.5)
+    plt.gca().xaxis.set_major_locator(plt.NullLocator())
+    plt.gca().yaxis.set_major_locator(plt.NullLocator())
+    plt.subplots_adjust(top=0.8, bottom=0, left=0.03, right=1, hspace=0, wspace=0)
+    plt.margins(0, 0)
+    plt.savefig(pngname, dpi=500)
+    plt.close()
+
+    return pngname + '_finish_write'
+
+
+#删除临时文件夹内容
+def del_all_file(path):
+    for i in os.listdir(path):
+        path_file = os.path.join(path, i)
+        os.remove(path_file)
+
+def main(json_file,json_range,outpath,conditions):
+    # 读取json浓度文件获取地块编号
+    with open(json_file, encoding='utf-8-sig') as f:  # 年json文件需要用utf-8-sig,gbk
+        data = json.load(f)
+        code = data['code']
+
+    # 读取json边界文件获取点坐标
+    with open(json_range, encoding='utf-8-sig') as f:  # 年json文件需要用utf-8-sig,gbk
+        data = json.load(f)
+        shp_data = data['data']
+        features_data = shp_data['features']
+        feature_data = features_data[0]
+        geometry_data = feature_data['geometry']
+        point_data = geometry_data['coordinates'][0]
+    points = pd.DataFrame(point_data, columns=['lon', 'lat'])
+
+    # 新建temp路径
+    if not os.path.isdir(outpath + '\\' + 'temp'):
+        os.mkdir(outpath + '\\' + 'temp')
+
+    # 新建shp路径
+    if not os.path.isdir(outpath + '\\' + 'range'):
+        os.mkdir(outpath + '\\' + 'range')
+
+    # 根据所得到的点坐标生成矢量面文件
+    out_shp = outpath + '\\' + 'range' + '\\' + 'range_' + code + '.shp'
+    create_range(points, out_shp)
+
+    # 读取污染物浓度json文件
+    with open(json_file, encoding='utf-8-sig') as f:  # 年json文件需要用utf-8-sig,gbk
+        data = json.load(f)
+        station_data = data['data']
+        typeName = data['typeName']
+
+    header = list(station_data[0].keys())
+
+    # 将获取的station_data转为dataframe
+    a = []
+    for j in station_data:
+        values = list(j.values())
+        a.append(values)
+    data = pd.DataFrame(a, columns=header)
+
+    # 获取污染物列表
+    pollution_kinds = list(set(data['sheetName']))
+    condit = list(conditions.keys())
+
+    # 循环处理不同污染物在不同地面条件下的浓度结果
+    for i in pollution_kinds:
+        data1 = data[data['sheetName'] == i]
+        # 获取阈值
+        threshold = list(set(data1['value']))[0]
+        # 将污染物分为三种情况
+        for j in condit:
+            data_need = data1[['x', 'y', j]]
+            # 生成矢量点文件
+            point_file = outpath + '\\' + 'temp' + '\\' + i + '_' + j + '_' + code + '.shp'
+            write_point(data_need, point_file)
+
+            # 插值
+            idw_file = outpath + '\\' + 'temp' + '\\' + i + '_' + j + '_' + code + '.tif'
+            idw(idw_file, point_file, out_shp, j)
+
+            # 掩膜处理
+            mask_file = outpath + '\\' + 'temp' + '\\' + i + '_' + j + '_' + code + '_mask' + '.tif'
+            out_data = mask_tif(mask_file, idw_file, out_shp)
+
+            # 掩膜文件转png输出
+            pngname = outpath + '\\' + i + '_' + j + '_' + code + '.png'
+            trans = conditions[j]
+            png_result = create_png(out_data, pngname, threshold,trans)
+            print(png_result)
+
+        # 删除临时文件夹
+        del_all_file(outpath + '\\' + 'temp')
+
+    # 删除临时创建文件夹
+    os.removedirs(outpath + '\\' + 'temp')
+    del_all_file(outpath + '\\' + 'range')
+    os.removedirs(outpath + '\\' + 'range')
+
+
+if __name__ == '__main__':
+    warnings.filterwarnings("ignore")
+    start_time = time.time()
+    #输出路径
+    outpath = 'H:\新疆环科院\浓度出图'
+    #json范围文件
+    json_range = r'H:\新疆环科院\边界.json'
+    #json浓度文件
+    json_file = r'H:\新疆环科院\6540261090004浓度(1).json'
+
+    #地面条件
+    conditions = {'cgw':'地下水中污染物浓度（mg·L-1）',
+                  'csur':'表层土壤中污染物浓度（mg·kg-1）',
+                  'csub':'下层土壤中污染物浓度（mg·kg-1）'}
+
+    #运行主函数
+    main(json_file, json_range, outpath, conditions)
+    end_time = time.time()
+    #返回运行完成信号
+    print('运行完成--总计用时%.2f分钟' % ((end_time-start_time)/60))
+
