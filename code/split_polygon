@@ -1,0 +1,62 @@
+#!/usr/bin/env python
+# encoding: utf-8
+
+from osgeo import ogr,gdal,osr
+import os,sys,osgeo
+import numpy
+ogr.RegisterAll()
+osgeo.gdal.SetConfigOption("SHAPE_ENCODING", "cp936")
+
+
+bhq_shape=r'H:\shanxi_city.shp'
+bhq_shp=ogr.Open(bhq_shape)
+dir = os.path.dirname(bhq_shape)
+
+bhq_layer:ogr.Layer=bhq_shp.GetLayer()
+bhq_layerDefn:ogr.FeatureDefn=bhq_layer.GetLayerDefn()
+
+name=[]
+for feature in bhq_layer:
+    if feature.GetField(2) not in name:
+        name.append(feature.GetField(2))
+
+bhq_layer.ResetReading()
+
+driver:ogr.Driver = ogr.GetDriverByName("ESRI Shapefile")
+srs = osr.SpatialReference()
+srs.ImportFromEPSG(4326)
+
+for n in name:
+    print(n)
+    ds = driver.CreateDataSource('H:\\out\\'+n+'.shp')
+    outlayer = ds.CreateLayer(n, srs, geom_type=ogr.wkbPolygon)
+
+list = os.listdir('H:\\out\\')
+
+bhq_layer.ResetReading()
+for feature in bhq_layer:
+    fieldname = feature.GetField(2)
+    print(fieldname)
+    if fieldname + '.shp' in list:
+        outfile: ogr.DataSource = ogr.Open('H:\\out\\' + fieldname + '.shp', 1)
+
+        out_layer = outfile.GetLayer()
+        field_name = ogr.FieldDefn("Province", ogr.OFTString)
+        field_name.SetWidth(50)
+        out_layer.CreateField(field_name)
+
+        field_name = ogr.FieldDefn("City", ogr.OFTString)
+        field_name.SetWidth(50)
+        out_layer.CreateField(field_name)
+
+        featureDefn = out_layer.GetLayerDefn()
+        outfeature = ogr.Feature(featureDefn)
+
+        outfeature.SetField("Province", feature.GetField(1))
+        outfeature.SetField("City", feature.GetField(2))
+        geometry = feature.GetGeometryRef()
+        outfeature.SetGeometry(geometry)
+        out_layer.CreateFeature(outfeature)
+
+        outfile = None
+        outfeature = None
