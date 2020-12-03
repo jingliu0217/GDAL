@@ -1,0 +1,632 @@
+#!/usr/bin/env python
+# encoding: utf-8
+
+"""
+目的：根据地块污染物浓度，获取某一地块内所有超标污染物所在位置
+
+1. 读取json边界文件创建边界矢量
+2. 读取json浓度文件
+3. 根据json浓度文件创建超标污染物矢量
+4. 矢量配色显示
+
+创建时间：2020-11-19
+创建人：刘静
+email:liu_xxxi@163.com
+"""
+import sys
+import os
+import time
+import glob
+import warnings
+import json
+import pandas as pd
+import numpy as np
+import warnings
+import time
+import sys,os
+import glob
+import gdal,ogr,osr
+from os.path import basename
+import fiona
+from shapely.ops import unary_union, polygonize,cascaded_union
+from shapely.geometry import Point, mapping
+from shapely.geometry import Polygon,Point,LineString,MultiPolygon,shape
+import pandas as pd
+import geopandas as gpd
+from matplotlib import pyplot as plt
+import matplotlib.pyplot as plt
+from mpl_toolkits.axes_grid1 import make_axes_locatable
+from matplotlib import colors as mcolors
+import matplotlib.patches as patches
+
+
+#range_shape生成
+def create_range(points,out_shp):
+    # 创建矢量文件
+    sr = osr.SpatialReference()
+    sr.ImportFromEPSG(4326)
+    driver: ogr.Driver = ogr.GetDriverByName('ESRI Shapefile')
+    shp_ds = driver.CreateDataSource(out_shp)
+    shp_layer = shp_ds.CreateLayer('range', sr, geom_type=ogr.wkbPolygon)
+
+    #  由线构建多边形
+    ring = ogr.Geometry(ogr.wkbLinearRing)  # 构建几何类型:线
+    for i in range(len(points)):
+        lat = points['lat'][i]
+        lon = points['lon'][i]
+        ring.AddPoint(lon,lat)
+    yard = ogr.Geometry(ogr.wkbPolygon)  # 构建几何类型:多边形面
+    yard.AddGeometry(ring)
+    yard.CloseRings()
+
+    point_feature = ogr.Feature(shp_layer.GetLayerDefn())
+    point_feature.SetGeometry(yard)
+    shp_layer.CreateFeature(point_feature)
+    point_feature = None
+    shp_layer = None
+    shp_ds = None
+
+#点矢量创建数字格式的字段
+def create_real_field(field_name, layer):
+    field_geo = ogr.FieldDefn(field_name, ogr.OFTReal)
+    field_geo.SetWidth(50)
+    field_geo.SetPrecision(3)
+    layer.CreateField(field_geo)  # 创建字段
+
+#点矢量创建字符串格式的字段
+def create_txt_field(field_name, layer):
+    field_geo = ogr.FieldDefn(field_name, ogr.OFTString)
+    field_geo.SetWidth(50)  # 设置长度
+    layer.CreateField(field_geo)  # 创建字段
+
+#根据站点坐标值生成点文件
+def write_point(sub_data, point_file):
+    """
+    站点数据写成shapefile文件
+    """
+    # gdal.SetConfigOption("GDAL_FILENAME_IS_UTF8","NO") #支持中文路径
+
+    fields = sub_data.columns
+
+    #gdal.SetConfigOption("SHAPE_ENCODING", "GBK")  # 属性字段支持中文
+    strDriverName = "ESRI Shapefile"
+    oDriver = ogr.GetDriverByName(strDriverName)
+    if oDriver == None:
+        print("{driver} 驱动不可用！".format(driver=strDriverName))
+        os._exit(0)
+
+    # 创建矢量数据源
+    data_source = oDriver.CreateDataSource(point_file)
+
+    # 指定坐标系
+    srs = osr.SpatialReference()
+    srs.ImportFromEPSG(4326)
+
+    # 创建图层
+    out_layer = data_source.CreateLayer("station_shape", srs, ogr.wkbPoint)
+
+    # 设置经纬度
+    create_real_field("Lat", out_layer)
+    create_real_field("Lon", out_layer)
+    #设置污染物浓度字段
+    create_real_field(fields[2], out_layer)
+
+    for index, row in sub_data.iterrows():
+        infeature = ogr.Feature(out_layer.GetLayerDefn())
+        infeature.SetField("Lat", row["y"])
+        infeature.SetField("Lon", row["x"])
+        infeature.SetField(fields[2], row[fields[2]])
+
+        wkt = "POINT(%f %f)" % (float(row['x']), float(row['y']))
+
+        point = ogr.CreateGeometryFromWkt(wkt)
+        infeature.SetGeometry(point)
+        out_layer.CreateFeature(infeature)
+
+    infeature = None
+    out_layer = None
+    data_source = None
+
+#根据点矢量进行重采样
+def idw(output_file,point_station_file,ref_shp,field):
+    """
+    idw空间插值
+    :param output_file:插值结果
+    :param point_station_file: 矢量站点数据
+    :return:
+    """
+
+    vector_ds = ogr.Open(ref_shp)
+    vector_layer = vector_ds.GetLayer()
+    x_min, x_max, y_min, y_max = vector_layer.GetExtent()
+    outputBounds=[x_min,y_max,x_max,y_min]
+
+    #根据四至和分辨率获取行列数
+    cols = int((x_max-x_min)/0.00001)
+    rows = int((y_max-y_min)/0.00001)
+
+    # 重采样代码调用
+    opts = gdal.GridOptions(
+        algorithm="invdist:power =3.6:smoothing =0.0:radius1=0.0:radius2=0.0:angle=0.0:max_points=12:min_points=0:nodata=0.0",
+        #algorithm="invdistnn:power=2.0:smothing=0.0:radius=1.0:max_points=12:min_points=0:nodata=0.0",
+        width=cols,
+        height=rows,
+        outputBounds=outputBounds,
+        format="GTiff", outputType=gdal.GDT_Float32, zfield=field)
+    idw_out = gdal.Grid(destName=output_file, srcDS=point_station_file, options=opts)
+    idw_out = None
+    vector_ds = None
+
+#重采样后根据shp文件进行掩膜裁剪，返回掩膜后数值
+def mask_tif(mask,input_tif,shp_range):
+    result = gdal.Warp(mask, input_tif,cutlineDSName=shp_range)
+    result.FlushCache()
+    tif_file = gdal.Open(mask)
+    data = tif_file.GetRasterBand(1).ReadAsArray()
+    del result
+    return data
+    tif_file = None
+
+#生成二值tif文件
+def outrange(outrange_raster, outrange_data, ref_file):
+
+    ref_tif = gdal.Open(ref_file)
+    ref_geom =ref_tif.GetGeoTransform()
+    ref_trans = ref_tif.GetProjection()
+
+    datatype = gdal.GDT_Float32
+
+    rows = outrange_data.shape[0]
+    cols = outrange_data.shape[1]
+
+    target_ds = gdal.GetDriverByName('GTiff').Create(outrange_raster,cols, rows, 1, datatype)
+    target_ds.SetGeoTransform(ref_geom)
+    target_ds.SetProjection(ref_trans)
+    band = target_ds.GetRasterBand(1)
+    band.SetNoDataValue(0)
+    band.WriteArray(outrange_data)
+    target_ds.FlushCache()
+    target_ds = None
+    ref_tif = None
+
+#二值文件转polygon
+def polygonize_shp(rasterfn,outSHPfn,p):
+    drv = ogr.GetDriverByName('ESRI Shapefile')
+    dst_range = drv.CreateDataSource(outSHPfn)
+    srs = osr.SpatialReference()
+    srs.ImportFromEPSG(4326)
+    dst_layer = dst_range.CreateLayer('dst_layername', srs=srs)
+    dst_fieldname = 'DN'
+    dst_field = dst_layer.GetLayerDefn().GetFieldIndex(dst_fieldname)
+    fd = ogr.FieldDefn(dst_fieldname, ogr.OFTInteger)
+    dst_layer.CreateField(fd)  # 创建字段
+    # # 添加字段
+    # newfiled = ogr.FieldDefn("type", ogr.OFTString)
+    # newfiled.SetWidth(50)
+    # dst_layer.CreateField(newfiled)
+
+    dst_field = 0  # 不可缺少
+    options = []
+
+    Defined_data= gdal.Open(rasterfn)
+    result = gdal.Polygonize(Defined_data.GetRasterBand(1), None, dst_layer, dst_field, options, callback=None)
+
+    # #字段赋值
+    # for feat in dst_layer:
+    #     feat.SetField("type", p)
+    #     dst_layer.SetFeature(feat)
+
+
+    # # 属性筛选
+    # dst_layer.SetAttributeFilter('DN=1')  # 属性选择1
+    # feat = dst_layer.GetNextFeature()
+    # SourceGeometry = feat.geometry()
+    # for ft in dst_layer:
+    #     SourceGeometry = SourceGeometry.Union(ft.geometry())
+    #     dst_layer.DeleteFeature(ft.GetFID())
+    # feat.SetGeometry(SourceGeometry)
+    # feat.SetField("type", p)
+    # dst_layer.SetFeature(feat)
+    #
+    dst_layer.SetAttributeFilter('DN=0')  # 属性选择0
+    for fea in dst_layer:
+        dst_layer.DeleteFeature(fea.GetFID())
+    dst_range.ExecuteSQL('RECOMPUTE EXTENT ON ' + dst_layer.GetName())
+    dst_range.Destroy()
+
+
+    dst_layer = None
+    dst_range = None
+    SourceGeometry = None
+
+#图片生成
+def create_png_withoutarea(infiles,border_file,pngname,name):
+
+    if not isinstance(infiles, list):
+        files = glob.glob(infiles + '/' + "*.shp")
+        if not files:
+            print("Folder " + infiles + "does not contain shapefiles")
+            sys.exit(-1)
+    else:
+        files = infiles
+
+    # 解决中文显示问题
+    plt.rcParams['font.sans-serif'] = ['SimHei']
+    plt.rcParams['axes.unicode_minus'] = False
+
+    fig = plt.figure(1, figsize=(4, 3))
+    axs0 = plt.subplot(111)
+
+    colors = dict(mcolors.BASE_COLORS, **mcolors.CSS4_COLORS)
+    color = list(colors.keys())
+    #random.shuffle(color)
+
+    border = gpd.read_file(border_file)
+    border.plot(ax=axs0, color = "white", edgecolor = 'black')
+
+    color_dict = {}
+    list_of_ions = []
+
+    for i in range (len(files)):
+        pollution_name = os.path.basename(files[i]).split('_')[0]
+        condition_name = os.path.basename(files[i]).split('_')[1].split('.')[0]
+        color_name = color[i]
+        data = gpd.read_file(files[i])
+        data.plot(ax=axs0, alpha = 0.5 , color=color_name)
+        color_dict[pollution_name] = color_name
+        list_of_ions.append(pollution_name)
+
+    #添加legend_box
+    title = conditions[condition_name] + '_' + name
+    #axs0.set( title= title, fontsize='5')
+    plt.suptitle(title, x=0.5, y=0.79,ha='center', fontsize='7')
+
+    #Creates a rectangular patch for each contaminant, using the colors above
+    patch_list = []
+    for ion in list_of_ions:
+        #label = ion.capitalize()
+        color_ = color_dict[ion]
+        patch_list.append(patches.Patch(facecolor=color_,
+                                        label= ' '+ion,
+                                        alpha=0.5,
+                                        linewidth=1))
+                                        #edgecolor='black'))
+    #Creates a legend with the list of patches above.
+    leg = axs0.legend(handles=patch_list, fontsize=5, loc='lower left', bbox_to_anchor=(0, 0))
+
+    # Adjust legend location
+    leg = axs0.get_legend()
+    leg.set_bbox_to_anchor((1, 0.05))
+
+    # 去除图像周围的白边
+    plt.gca().set_axis_off()
+    plt.gca().xaxis.set_major_locator(plt.NullLocator())
+    plt.gca().yaxis.set_major_locator(plt.NullLocator())
+    plt.margins(0.01, 0.01)
+    plt.savefig(pngname, dpi=300, bbox_inches='tight')
+    plt.close()
+
+def mergeVectors(infiles, outfile):
+    """
+    Merge a list of vector files in one
+    """
+
+    if (not outfile.lower().endswith('.shp')):
+        print (basename(outfile) + " is not a valid name for shapefile output." \
+                            "It will be replaced by " + basename(outfile)[:-4] + ".shp")
+        outfile = basename(outfile)[:-4] + '.shp'
+
+    driver = ogr.GetDriverByName('ESRI Shapefile')
+
+    if os.path.exists(outfile):
+        driver.DeleteDataSource(outfile)
+
+    if not isinstance(infiles, list):
+        #print (infiles)
+        files = glob.glob(infiles + '/' + "*.shp")
+        if not files:
+            print ("Folder " + infiles + "does not contain shapefiles")
+            sys.exit(-1)
+    else:
+        files = infiles
+
+    # Append first file to the output file
+    file1 = files[0]
+    fusion = "ogr2ogr " + outfile + " " + file1
+    os.system(fusion)
+
+    layername = os.path.splitext(os.path.basename(outfile))[0]
+    # Append other files to the output file
+    nbfiles = len(files)
+    progress = 0
+    for f in range(1, nbfiles):
+        fusion2 = "ogr2ogr -update -append " + outfile + " " + files[f] + " -nln " + layername
+        #print (fusion2)
+        #print (outfile)
+        os.system(fusion2)
+
+
+def unary_union_multipolygon(infile,outfile):
+    srs = osr.SpatialReference()
+    srs.SetFromUserInput("EPSG:4326")
+    wgs84 = srs.ExportToProj4()
+
+    with fiona.open(infile) as layer:
+        rings = [LineString(list(shape(pol['geometry']).exterior.coords)) for pol in layer]
+        union_ = cascaded_union(rings)
+        result = [geom for geom in polygonize(union_)]
+        schema = layer.schema.copy()
+        schema['properties']['area'] = 'float:10.3'
+        with fiona.open(outfile, 'w', crs=wgs84, driver='ESRI Shapefile', schema=schema) as c:
+            for index, pol in enumerate(result):
+                c.write({'geometry': mapping(pol),
+                         'properties': {'DN': index, 'area': pol.area * 10000000000 }})  # 面积平方米
+
+def create_png(union_file,shape_files,border_file,png_name,risk_name,outpath):
+
+    pngname = outpath + '\\' + png_name + '.png'
+
+    # 开始plot
+    # 解决中文显示问题
+    plt.rcParams['font.sans-serif'] = ['SimHei']
+    plt.rcParams['axes.unicode_minus'] = False
+    fig = plt.figure(1, figsize=(4, 3))
+    axs0 = plt.subplot(111)
+
+    # 边界plot
+    border = gpd.read_file(border_file)
+    border.plot(ax=axs0, color="white", edgecolor='black')
+
+    # 将union内geometry与污染物shapefile比较
+    pollution_num = len(glob.glob1(shape_files, "*.shp"))
+    collections = []
+    f_names=[]
+    for filename in glob.glob(shape_files + "\\" + "*.shp"):
+        collections.append(gpd.GeoDataFrame.from_file(filename))
+        f_names.append(os.path.basename(filename).split('_')[0])
+
+    g1 = gpd.GeoDataFrame.from_file(union_file)
+    length_union_shape = g1.shape[0]
+
+    g1['centroid'] = gpd.GeoSeries(g1.centroid)
+
+    out_dict = {}
+    names = []
+    print_name = []
+    for i in range(length_union_shape):
+        name = []
+        for j in range(pollution_num):
+            if (collections[j].intersects(g1.iloc[i]['centroid'])).any():
+                #field_name = str(collections[j]['test'][0])
+                field_name = f_names[j]
+                print_name.append(field_name)
+                name.append(field_name)
+                name.sort()
+                name_ = '_'.join(name)
+            else:
+                pass
+        # 新建字段
+        names.append(name_)
+    g1['name'] = names
+
+    print(png_name.split('_')[0])
+    print(list(set(print_name)))
+
+    uni_name = list(set(names))
+    name_num = len(uni_name)
+
+    colors = dict(mcolors.BASE_COLORS, **mcolors.CSS4_COLORS)
+    color = list(colors.keys())
+    light_color = ['w', 'white', 'snow', 'whitesmoke', 'aliceblue', 'azure', 'antiquewhite', 'k','black']
+    for i in light_color: color.remove(i)
+
+    need_color = color[0:name_num]
+    label = {}
+    for i in range(name_num):
+        label[uni_name[i]] = need_color[i]
+
+    plot_color = [label[i] for i in names]
+    g1.plot(ax=axs0, color=plot_color, alpha=0.5)
+
+    # 添加legend_box
+    title =  png_name
+    #axs0.set_title( title= title, fontsize='5')
+    plt.suptitle(title, x=0.5, y=0.8, ha='center', fontsize='7')#, x=0.5, y=1.5,
+
+    # 去除图像周围的白边
+    plt.gca().set_axis_off()
+    plt.gca().xaxis.set_major_locator(plt.NullLocator())
+    plt.gca().yaxis.set_major_locator(plt.NullLocator())
+    plt.margins(0.01, 0.01)
+
+    # Creates a rectangular patch for each contaminant, using the colors above
+    patch_list = []
+    for ion in uni_name:
+        color_ = label[ion]
+        area_p = round(g1[g1['name'] == ion]['area'].sum(),2)
+        area_pp = str(area_p)
+        patch_list.append(patches.Patch(facecolor=color_,
+                                        label=' ' + ion + ' 污染面积 ' + area_pp + '平方米',
+                                        alpha=0.5,
+                                        linewidth=1))
+    patch_list.append(patches.Patch(facecolor='white',
+                                    label=' 厂区边框',
+                                    linewidth=0.5,
+                                    edgecolor='black'))
+    leg = axs0.legend(handles=patch_list, fontsize=3, loc='lower left', bbox_to_anchor=(0.5, 0., 0.5, 0.5))
+    leg = axs0.get_legend()
+    leg.set_title('图例')
+    #plt.setp(leg.get_title(), fontsize='xx-small')
+    leg.get_title().set_fontsize('4')
+    leg._legend_box.align = "left"
+    leg.get_title().set_position((-2,4))
+    leg.get_frame().set_edgecolor('lightgray')
+    leg.get_frame().set_linewidth(0.5)
+
+
+    x, y, arrow_length = 1.1,1.1,0.25
+    axs0.annotate('N', xy=(x, y), xytext=(x, y - arrow_length),
+                arrowprops=dict(facecolor='black', width=0.8, headwidth=3),
+                ha='center', va='center', fontsize=8,
+                xycoords=axs0.transAxes)
+
+    leg.set_bbox_to_anchor((1, 0.05))
+    plt.savefig(pngname, dpi=300, bbox_inches='tight')
+    plt.close()
+
+
+#删除临时文件夹内容
+def del_all_file(path):
+    for i in os.listdir(path):
+        path_file = os.path.join(path, i)
+        os.remove(path_file)
+
+#main
+def main(json_file,json_range,outpath,conditions):
+    # 读取json浓度文件获取地块编号
+    with open(json_file, encoding='utf-8-sig') as f:  # 年json文件需要用utf-8-sig,gbk
+        data = json.load(f)
+        code = data['code']
+        name = data['name']
+
+    # 读取json边界文件获取点坐标
+    with open(json_range, encoding='utf-8-sig') as f:  # 年json文件需要用utf-8-sig,gbk
+        data = json.load(f)
+        shp_data = data['data']
+        features_data = shp_data['features']
+        feature_data = features_data[0]
+        geometry_data = feature_data['geometry']
+        point_data = geometry_data['coordinates'][0]
+    points = pd.DataFrame(point_data, columns=['lon', 'lat'])
+
+    # 新建temp路径
+    if not os.path.isdir(outpath + '\\' + 'temp'):
+        os.mkdir(outpath + '\\' + 'temp')
+
+    # 新建边界路径
+    if not os.path.isdir(outpath + '\\' + 'range'):
+        os.mkdir(outpath + '\\' + 'range')
+
+    # 新建超标污染物路径
+    if not os.path.isdir(outpath + '\\' + 'outrange'):
+        os.mkdir(outpath + '\\' + 'outrange')
+
+    if not os.path.isdir(outpath + '\\' + 'union'):
+        os.mkdir(outpath + '\\' + 'union')
+
+    # 根据所得到的点坐标生成矢量面文件
+    out_shp = outpath + '\\' + 'range' + '\\' + 'range_' + code + '.shp'
+    create_range(points, out_shp)
+
+    # 读取污染物浓度json文件
+    with open(json_file, encoding='utf-8-sig') as f:  # 年json文件需要用utf-8-sig,gbk
+        data = json.load(f)
+        station_data = data['data']
+        typeName = data['typeName']
+
+    header = list(station_data[0].keys())
+
+    # 将获取的station_data转为dataframe
+    a = []
+    for j in station_data:
+        values = list(j.values())
+        a.append(values)
+    data = pd.DataFrame(a, columns=header)
+
+    # 获取污染物列表
+    pollution_kinds = list(set(data['sheetName']))
+    condit = list(conditions.keys())
+
+    # 循环地面条件来获取同一地块的污染物超标种类
+    for i in condit:
+        fields_need = header[3:7]
+        fields_need.append(i)
+        data_inter = data[fields_need]
+
+        # 循环不同的污染物来得到所有超标污染物的矢量图
+        for j in pollution_kinds:
+            data1 = data_inter[data_inter['sheetName'] == j]
+            # 获取阈值
+            threshold = float(list(set(data1['value']))[0])
+            # 根据阈值判断污染物是否有超标部分
+            # 如果无超标部分直接pass
+            if max(list(map(int, list(data1[i])))) <= threshold:
+                pass
+            # 否则进行插值处理和超标部分提取
+            else:
+                data_need = data1[['x', 'y', i]]
+                # 生成矢量点文件
+                point_file = outpath + '\\' + 'temp' + '\\' + j + '_' + i + '.shp'
+                write_point(data_need, point_file)
+
+                # 插值
+                idw_file = outpath + '\\' + 'temp' + '\\' + j + '_' + i + '.tif'
+                idw(idw_file, point_file, out_shp, i)
+
+                # 掩膜处理
+                mask_file = outpath + '\\' + 'temp' + '\\' + j + '_' + i + '_mask' + '.tif'
+                out_data = mask_tif(mask_file, idw_file, out_shp)
+
+                # 获取超标污染物范围,大于阈值部分取值为1
+                outrange_data = np.where(out_data > threshold, 1, 0)
+
+                # 二值文件生成raster 并转为polygon
+                outrange_raster = outpath + '\\' + 'temp' + '\\' + j + '_' + i + '_outrange' + '.tif'
+                outrange(outrange_raster, outrange_data, idw_file)
+
+                # 栅格矢量化
+                outrange_polygon = outpath + '\\' + 'outrange' + '\\' + j + '_' + i + '.shp'
+                polygonize_shp(outrange_raster, outrange_polygon, j)
+
+        #判断是否有污染物
+        if not os.listdir(outpath + '\\' + 'outrange'):
+            print('i' + '无污染物')
+        else:
+            # 生成图片
+            shp_folder = outpath + '\\' + 'outrange'
+            merge_file = outpath + '\\' + 'union' + '\\' + 'merge' + '.shp'
+            union_file = outpath + '\\' + 'union' + '\\' + 'union' + '.shp'
+            mergeVectors(shp_folder, merge_file)
+            unary_union_multipolygon(merge_file, union_file)
+
+            png_name = conditions[i] + '_' + name
+
+            #pngname = outpath + '\\' + png_name + '.png'
+            create_png(union_file, shp_folder, out_shp, png_name, name, outpath)
+
+            # 删除临时文件夹
+            del_all_file(outpath + '\\' + 'outrange')
+            del_all_file(outpath + '\\' + 'union')
+
+    # 删除临时文件夹
+    del_all_file(outpath + '\\' + 'temp')
+    del_all_file(outpath + '\\' + 'range')
+
+    os.removedirs(outpath + '\\' + 'temp')
+    os.removedirs(outpath + '\\' + 'range')
+    os.removedirs(outpath + '\\' + 'outrange')
+    os.removedirs(outpath + '\\' + 'union')
+
+
+if __name__ == '__main__':
+    warnings.filterwarnings("ignore")
+    start_time = time.time()
+    #输出路径
+    outpath = r'H:\新疆环科院\result'
+    #json范围文件
+    json_range = r'H:\新疆环科院\6540261090004边界.json'
+    #json浓度文件
+    json_file = r'H:\新疆环科院\6540261090004_致癌风险边界.json'
+
+    # 地面条件
+    conditions = {'cgw': '地下水中污染物浓度超标范围',
+                  'csur': '表层土壤中污染物浓度超标范围',
+                  'csub': '下层土壤中污染物浓度超标范围'}
+    # 解决中文显示问题
+    plt.rcParams['font.sans-serif'] = ['SimHei']
+    plt.rcParams['axes.unicode_minus'] = False
+
+    main(json_file, json_range, outpath, conditions)
+    end_time = time.time()
+    #返回运行完成信号
+    print('运行完成--总计用时%.2f分钟' % ((end_time-start_time)/60))
