@@ -1,3 +1,5 @@
+import ogr,gdal
+
 def idw(output_file,point_station_file,ref_shp,field):
     """
     idw interpolation method
