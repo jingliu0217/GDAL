@@ -1,0 +1,20 @@
+import fiona
+from shapely.ops import unary_union, polygonize,cascaded_union
+from shapely.geometry import Point, mapping
+from shapely.geometry import Polygon,Point,LineString,MultiPolygon,shape
+import osr
+def unary_union_multipolygon(infile,outfile):
+    srs = osr.SpatialReference()
+    srs.SetFromUserInput("EPSG:4326")
+    wgs84 = srs.ExportToProj4()
+
+    with fiona.open(infile) as layer:
+        rings = [LineString(list(shape(pol['geometry']).exterior.coords)) for pol in layer]
+        union_ = cascaded_union(rings)
+        result = [geom for geom in polygonize(union_)]
+        schema = layer.schema.copy()
+        schema['properties']['area'] = 'float:10.3'
+        with fiona.open(outfile, 'w', crs=wgs84, driver='ESRI Shapefile', schema=schema) as c:
+            for index, pol in enumerate(result):
+                c.write({'geometry': mapping(pol),
+                         'properties': {'DN': index, 'area': pol.area}})
