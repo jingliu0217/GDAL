@@ -1,0 +1,16 @@
+
+import gdal
+def mask_tif(mask,input_tif,shp_range):
+    """
+    :param mask: output mask file name
+    :param input_tif: input tif which need to mask
+    :param shp_range: mask vector 
+    :return: data of masked tif
+    """
+    result = gdal.Warp(mask, input_tif,cutlineDSName=shp_range)
+    result.FlushCache()
+    tif_file = gdal.Open(mask)
+    data = tif_file.GetRasterBand(1).ReadAsArray()
+    del result
+    return data
+    tif_file = None
