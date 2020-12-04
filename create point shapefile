@@ -1,0 +1,59 @@
+import numpy as np
+import pandas as pd
+import gdal,ogr,osr
+
+def create_real_field(field_name, layer):
+    field_geo = ogr.FieldDefn(field_name, ogr.OFTReal)
+    field_geo.SetWidth(50)
+    field_geo.SetPrecision(3)
+    layer.CreateField(field_geo)
+
+def create_txt_field(field_name, layer):
+    field_geo = ogr.FieldDefn(field_name, ogr.OFTString)
+    field_geo.SetWidth(50) 
+    layer.CreateField(field_geo) 
+
+
+def write_point(sub_data, point_file):
+    """
+    sub_data: pd.DataFrame data with field lantitude,longitude and other necessary information you need
+    point_file:output point shapefile
+    """
+    # gdal.SetConfigOption("GDAL_FILENAME_IS_UTF8","NO") #支持中文路径
+
+    fields = sub_data.columns
+
+    #gdal.SetConfigOption("SHAPE_ENCODING", "GBK")  # 属性字段支持中文
+    strDriverName = "ESRI Shapefile"
+    oDriver = ogr.GetDriverByName(strDriverName)
+    if oDriver == None:
+        print("{driver} 驱动不可用！".format(driver=strDriverName))
+        os._exit(0)
+
+    data_source = oDriver.CreateDataSource(point_file)
+
+    srs = osr.SpatialReference()
+    srs.ImportFromEPSG(4326)
+
+    out_layer = data_source.CreateLayer("station_shape", srs, ogr.wkbPoint)
+
+    create_real_field("Lat", out_layer)
+    create_real_field("Lon", out_layer)
+
+    create_real_field(fields[2], out_layer)
+
+    for index, row in sub_data.iterrows():
+        infeature = ogr.Feature(out_layer.GetLayerDefn())
+        infeature.SetField("Lat", row["y"])
+        infeature.SetField("Lon", row["x"])
+        infeature.SetField(fields[2], row[fields[2]])
+
+        wkt = "POINT(%f %f)" % (float(row['x']), float(row['y']))
+
+        point = ogr.CreateGeometryFromWkt(wkt)
+        infeature.SetGeometry(point)
+        out_layer.CreateFeature(infeature)
+
+    infeature = None
+    out_layer = None
+    data_source = None
