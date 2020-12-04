@@ -1,0 +1,27 @@
+def idw(output_file,point_station_file,ref_shp,field):
+    """
+    idw interpolation method
+    :param output_file:output file name 
+    :param point_station_file: input point shapefile
+    :param ref_shp: reference shape with coordinate
+    :param field:point shapefile field you need to interpolate
+    """
+
+    vector_ds = ogr.Open(ref_shp)
+    vector_layer = vector_ds.GetLayer()
+    x_min, x_max, y_min, y_max = vector_layer.GetExtent()
+    outputBounds=[x_min,y_max,x_max,y_min]
+
+    #set pixel resolution = 0.001
+    cols = int((x_max-x_min)/0.001)
+    rows = int((y_max-y_min)/0.001)
+
+    opts = gdal.GridOptions(
+        algorithm="invdist:power =3.6:smoothing =0.0:radius1=0.0:radius2=0.0:angle=0.0:max_points=12:min_points=0:nodata=0.0",
+        width=cols,
+        height=rows,
+        outputBounds=outputBounds,
+        format="GTiff", outputType=gdal.GDT_Float32, zfield=field)
+    idw_out = gdal.Grid(destName=output_file, srcDS=point_station_file, options=opts)
+    idw_out = None
+    vector_ds = None
