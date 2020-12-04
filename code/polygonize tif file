@@ -1,0 +1,30 @@
+import gdal,ogr
+def polygonize_shp(rasterfn,outSHPfn):
+    '''
+    :param rasterfn: inoput tif file
+    :param outSHPfn: out put ESRI shapefile
+    '''
+    drv = ogr.GetDriverByName('ESRI Shapefile')
+    dst_range = drv.CreateDataSource(outSHPfn)
+    srs = osr.SpatialReference()
+    srs.ImportFromEPSG(4326)
+    dst_layer = dst_range.CreateLayer('dst_layername', srs=srs)
+    dst_fieldname = 'DN'
+    dst_field = dst_layer.GetLayerDefn().GetFieldIndex(dst_fieldname)
+    fd = ogr.FieldDefn(dst_fieldname, ogr.OFTInteger)
+    dst_layer.CreateField(fd) 
+
+    dst_field = 0 
+    options = []
+
+    Defined_data= gdal.Open(rasterfn)
+    result = gdal.Polygonize(Defined_data.GetRasterBand(1), None, dst_layer, dst_field, options, callback=None)
+
+    dst_layer.SetAttributeFilter('DN=0') 
+    for fea in dst_layer:
+        dst_layer.DeleteFeature(fea.GetFID())
+    dst_range.ExecuteSQL('RECOMPUTE EXTENT ON ' + dst_layer.GetName())
+    dst_range.Destroy()
+    dst_layer = None
+    dst_range = None
+    SourceGeometry = None
