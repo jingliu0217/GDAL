@@ -1,5 +1,5 @@
-# GDAL
-GDAL learning note
+# python
+python learning note
 
 There are some functions mostly used.
 ~from csv or json file create point shapefile
