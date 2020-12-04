@@ -1,0 +1,30 @@
+import gdal,ogr,osr
+def reprojection(tiff_file,outputfilePath):
+    '''
+    :param tiff_file: input tif file
+    :param outputfilePath: output file path and name
+    '''
+    in_ds = gdal.Open(tiff_file)
+    nb=in_ds.RasterCount
+    x=in_ds.RasterXSize
+    y=in_ds.RasterYSize
+    x_1=round(x*55.5) #defined by yourself
+    y_1=round(y*55.5) #defined by yourself
+    geotrans = list(in_ds.GetGeoTransform())
+    geotrans[1] = geotrans[5] = 0.009 #pixel resolution
+
+    inputProj = in_ds.GetProjection()
+    driver = gdal.GetDriverByName('GTiff')
+    datatype = gdal.GDT_Float32
+    output = driver.Create(outputfilePath, x_1, y_1, nb,datatype)
+    band = output.GetRasterBand(1)
+    band.SetNoDataValue(0)
+    output.SetGeoTransform(geotrans)
+    output.SetProjection(inputProj)
+    # 参数说明 输入数据集、输出文件、输入投影、参考投影、重采样方法(最邻近内插\双线性内插\三次卷积等)、回调函数
+    options = gdal.WarpOptions(srcSRS=inputProj, dstSRS=inputProj, resampleAlg=gdalconst.GRA_Bilinear)
+    gdal.Warp(output, tiff_file, options=options)
+
+    driver=None
+    output=None
+    in_ds=None
