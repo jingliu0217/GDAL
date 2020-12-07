@@ -1,0 +1,113 @@
+
+def create_png(union_file,shape_files,border_file,png_name,risk_name,outpath):
+
+    pngname = outpath + '\\' + png_name + '.png'
+
+    # 开始plot
+    # 解决中文显示问题
+    plt.rcParams['font.sans-serif'] = ['SimHei']
+    plt.rcParams['axes.unicode_minus'] = False
+    fig = plt.figure(1, figsize=(4, 3))
+    axs0 = plt.subplot(111)
+
+    # 边界plot
+    border = gpd.read_file(border_file)
+    border.plot(ax=axs0, color="white", edgecolor='black')
+
+    # 将union内geometry与污染物shapefile比较
+    pollution_num = len(glob.glob1(shape_files, "*.shp"))
+    collections = []
+    f_names=[]
+    for filename in glob.glob(shape_files + "\\" + "*.shp"):
+        collections.append(gpd.GeoDataFrame.from_file(filename))
+        f_names.append(os.path.basename(filename).split('_')[0])
+
+    g1 = gpd.GeoDataFrame.from_file(union_file)
+    length_union_shape = g1.shape[0]
+
+    g1['centroid'] = gpd.GeoSeries(g1.centroid)
+
+    out_dict = {}
+    names = []
+    print_name = []
+    for i in range(length_union_shape):
+        name = []
+        for j in range(pollution_num):
+            if (collections[j].intersects(g1.iloc[i]['centroid'])).any():
+                #field_name = str(collections[j]['test'][0])
+                field_name = f_names[j]
+                print_name.append(field_name)
+                name.append(field_name)
+                name.sort()
+                name_ = '_'.join(name)
+            else:
+                pass
+        # 新建字段
+        names.append(name_)
+    g1['name'] = names
+
+    print(png_name.split('_')[0])
+    print(list(set(print_name)))
+
+    uni_name = list(set(names))
+    name_num = len(uni_name)
+
+    colors = dict(mcolors.BASE_COLORS, **mcolors.CSS4_COLORS)
+    color = list(colors.keys())
+    light_color = ['w', 'white', 'snow', 'whitesmoke', 'aliceblue', 'azure', 'antiquewhite', 'k','black']
+    for i in light_color: color.remove(i)
+
+    need_color = color[0:name_num]
+    label = {}
+    for i in range(name_num):
+        label[uni_name[i]] = need_color[i]
+
+    plot_color = [label[i] for i in names]
+    g1.plot(ax=axs0, color=plot_color, alpha=0.5)
+
+    # 添加legend_box
+    title =  png_name
+    #axs0.set_title( title= title, fontsize='5')
+    plt.suptitle(title, x=0.5, y=0.8, ha='center', fontsize='7')#, x=0.5, y=1.5,
+
+    # 去除图像周围的白边
+    plt.gca().set_axis_off()
+    plt.gca().xaxis.set_major_locator(plt.NullLocator())
+    plt.gca().yaxis.set_major_locator(plt.NullLocator())
+    plt.margins(0.01, 0.01)
+
+    # Creates a rectangular patch for each contaminant, using the colors above
+    patch_list = []
+    for ion in uni_name:
+        color_ = label[ion]
+        area_p = round(g1[g1['name'] == ion]['area'].sum(),2)
+        area_pp = str(area_p)
+        patch_list.append(patches.Patch(facecolor=color_,
+                                        label=' ' + ion + ' 污染面积 ' + area_pp + '平方米',
+                                        alpha=0.5,
+                                        linewidth=1))
+    patch_list.append(patches.Patch(facecolor='white',
+                                    label=' 厂区边框',
+                                    linewidth=0.5,
+                                    edgecolor='black'))
+    leg = axs0.legend(handles=patch_list, fontsize=3, loc='lower left', bbox_to_anchor=(0.5, 0., 0.5, 0.5))
+    leg = axs0.get_legend()
+    leg.set_title('图例')
+    #plt.setp(leg.get_title(), fontsize='xx-small')
+    leg.get_title().set_fontsize('4')
+    leg._legend_box.align = "left"
+    leg.get_title().set_position((-2,4))
+    leg.get_frame().set_edgecolor('lightgray')
+    leg.get_frame().set_linewidth(0.5)
+
+
+    x, y, arrow_length = 1.1,1.1,0.25
+    axs0.annotate('N', xy=(x, y), xytext=(x, y - arrow_length),
+                arrowprops=dict(facecolor='black', width=0.8, headwidth=3),
+                ha='center', va='center', fontsize=8,
+                xycoords=axs0.transAxes)
+
+    leg.set_bbox_to_anchor((1, 0.05))
+    plt.savefig(pngname, dpi=300, bbox_inches='tight')
+    plt.close()
+
