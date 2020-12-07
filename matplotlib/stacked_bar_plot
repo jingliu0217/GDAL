@@ -1,0 +1,73 @@
+
+def COD_plot(COD_out, city_names,pngname):
+    '''
+    离散系数plot
+    :param COD_out: dictionary形式，key为市级名称，value为该市级对于其他市级的离散系数值
+    :param city_names: 城市名称
+    :param pngname: 输出图片名称
+    :return: 图片写完信号
+    '''
+    norm_df = {}
+    COD_orig = []
+    for c in city_names:
+        c_data = COD_out[c]
+        COD_orig.append(c_data)
+        norm_data = normalize_list(c_data)
+        norm_df[c] =norm_data
+    COD_orig = np.array(COD_orig).reshape(100, 1)
+
+    #plot
+    # 解决中文显示问题
+    plt.rcParams['font.sans-serif'] = ['SimHei']
+    plt.rcParams['axes.unicode_minus'] = False
+
+    df = pd.DataFrame(data=norm_df).T
+    df.columns = city_names
+
+    #plt.style.use('ggplot')
+    plt.rcParams['figure.facecolor'] = 'white'
+
+    colors = sns.color_palette("Set3", n_colors=10)
+    cmap1 = LinearSegmentedColormap.from_list("my_colormap", colors)
+
+    ax = df.plot(stacked=True, kind='bar', figsize=(13, 10), rot='horizontal', colormap=cmap1, \
+                 width = 1,edgecolor = 'black', linewidth=0.3)
+
+    plt.xlim([-0.5, 9.5])
+    plt.ylim([0, 100])
+
+    # .patches is everything inside of the chart
+    index = 0
+    for rect in ax.patches:
+        # Find where everything is located
+        height = rect.get_height()
+        width = rect.get_width()
+        x = rect.get_x()
+        y = rect.get_y()
+
+        # The height of the bar is the data value and can be used as the label
+        #label_text = f'{height}'  # f'{height:.2f}' to format decimal values
+        label_text = round(COD_orig[index].item(),4)
+        index = index+1
+
+        # ax.text(x, y, text)
+        label_x = x + width / 2
+        label_y = y + height / 2
+
+        # plot only when height is greater than specified value
+        if height > 0:
+            ax.text(label_x, label_y, label_text, ha='center', va='center', fontsize=9)
+
+    #ax.legend(bbox_to_anchor=(1.01, 0.5), loc='lower center', borderaxespad=0.2)
+    ax.legend( bbox_to_anchor=(0.5,-0.11), loc='lower center', borderaxespad=0.1,ncol=10)
+
+    ax.set_ylabel("空间离散系数占比%", fontsize=15)
+    title = '臭氧浓度空间离散系数百分比堆积情况'
+    plt.suptitle(title, x=0.5, y=0.94, ha='center', fontsize='18')  # , x=0.5, y=1.5
+
+    ax.tick_params(width=0,length=0.5)
+
+    plt.savefig(pngname,dpi=500)
+    plt.close()
+
+    return pngname + '_finish_write'
