@@ -1,0 +1,140 @@
+#!/usr/bin/env python
+# encoding: utf-8
+
+
+import sys, os
+from osgeo import ogr,gdal,osr
+import argparse
+import os.path
+from os.path import basename
+import glob
+import warnings
+
+# 属性表字段支持中文
+gdal.UseExceptions()
+gdal.SetConfigOption("SHAPE_ENCODING", "gb2312")
+
+def mergeVectors(infiles, outfile):
+    """
+    Merge a list of vector files in one
+    """
+
+    if (not outfile.lower().endswith('.shp')):
+        print (basename(outfile) + " is not a valid name for shapefile output." \
+                            "It will be replaced by " + basename(outfile)[:-4] + ".shp")
+        outfile = basename(outfile)[:-4] + '.shp'
+
+    driver = ogr.GetDriverByName('ESRI Shapefile')
+
+    if os.path.exists(outfile):
+        driver.DeleteDataSource(outfile)
+
+    if not isinstance(infiles, list):
+        #print (infiles)
+        files = glob.glob(infiles + '/' + "*.shp")
+        if not files:
+            print ("Folder " + infiles + "does not contain shapefiles")
+            sys.exit(-1)
+    else:
+        files = infiles
+
+    # Append first file to the output file
+    file1 = files[0]
+    fusion = "ogr2ogr " + outfile + " " + file1
+    os.system(fusion)
+
+    layername = os.path.splitext(os.path.basename(outfile))[0]
+    # Append other files to the output file
+    nbfiles = len(files)
+    progress = 0
+    for f in range(1, nbfiles):
+        fusion2 = "ogr2ogr -update -append " + outfile + " " + files[f] + " -nln " + layername
+        #print (fusion2)
+        #print (outfile)
+        os.system(fusion2)
+        progress += 1
+        #print ("Progress : %s" % (float(progress) / float(nbfiles) * 100.))
+
+
+    return outfile
+
+if __name__ == "__main__":
+    warnings.filterwarnings('ignore')
+    infiles = r'H:\新疆环科院\result\outrange'
+    outfile = r'H:\新疆环科院\result\merge_vectors1125.shp'
+    out = mergeVectors(infiles, outfile)
+    print(out)
+
+    outfile_ds:ogr.DataSource = ogr.Open(outfile)
+    lyr = outfile_ds.GetLayer()
+
+    outfile1_ds: ogr.DataSource = ogr.Open(r'H:\code_test\merge_vectors\New_Shapefile.shp')
+    lyr1 = outfile1_ds.GetLayer()
+    outfile2_ds: ogr.DataSource = ogr.Open(r'H:\code_test\merge_vectors\New_Shapefile(2).shp')
+    lyr2 = outfile2_ds.GetLayer()
+    outfile3_ds: ogr.DataSource = ogr.Open(r'H:\code_test\merge_vectors\New_Shapefile(3).shp')
+    lyr3 = outfile3_ds.GetLayer()
+    outfile4_ds: ogr.DataSource = ogr.Open(r'H:\code_test\merge_vectors\New_Shapefile(4).shp')
+    lyr4 = outfile4_ds.GetLayer()
+
+
+    driver: ogr.Driver = ogr.GetDriverByName("ESRI Shapefile")
+    dst_osr = osr.SpatialReference()
+    dst_osr.ImportFromEPSG(4326)
+    outds = driver.CreateDataSource(r'H:\code_test\TEST\merge_identity.shp')
+    outlayer = outds.CreateLayer('identify', dst_osr, geom_type=ogr.wkbPolygon)
+    # lyr.Identity(lyr1, outlayer)
+    # print(1)
+    lyr.Identity(lyr2, outlayer)
+    print(2)
+    #lyr.Identity(lyr3, outlayer)
+    # lyr.Identity(lyr4, outlayer)
+
+    def dedup(geometries):
+        """Return a geometry that is the union of all geometries."""
+        if not geometries:  return None
+        current_union = geometries[0].Clone()
+        for g in geometries:
+            current_union = current_union.Union(g).Clone()
+        return current_union
+
+
+    import os
+    from osgeo import ogr
+
+
+    def createDS(ds_name, ds_format, geom_type, srs, overwrite=False):
+        drv = ogr.GetDriverByName(ds_format)
+        if os.path.exists(ds_name) and overwrite is True:
+            deleteDS(ds_name)
+        ds = drv.CreateDataSource(ds_name)
+        lyr_name = os.path.splitext(os.path.basename(ds_name))[0]
+        lyr = ds.CreateLayer(lyr_name, srs, geom_type)
+        return ds, lyr
+
+
+    def dissolve(input, output, multipoly=False, overwrite=False):
+        ds = ogr.Open(input)
+        lyr = ds.GetLayer()
+        out_ds, out_lyr = createDS(output, ds.GetDriver().GetName(), lyr.GetGeomType(), lyr.GetSpatialRef(), overwrite)
+        defn = out_lyr.GetLayerDefn()
+        multi = ogr.Geometry(ogr.wkbMultiPolygon)
+        for feat in lyr:
+            if feat.geometry():
+                feat.geometry().CloseRings()  # this copies the first point to the end
+                wkt = feat.geometry().ExportToWkt()
+                multi.AddGeometryDirectly(ogr.CreateGeometryFromWkt(wkt))
+        union = multi.UnionCascaded()
+        if multipoly is False:
+            for geom in union:
+                poly = ogr.CreateGeometryFromWkb(geom.ExportToWkb())
+                feat = ogr.Feature(defn)
+                feat.SetGeometry(poly)
+                out_lyr.CreateFeature(feat)
+        else:
+            out_feat = ogr.Feature(defn)
+            out_feat.SetGeometry(union)
+            out_lyr.CreateFeature(out_feat)
+            out_ds.Destroy()
+        ds.Destroy()
+        return True
